@@ -1,5 +1,6 @@
 import logging
 import os
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
@@ -14,21 +15,26 @@ from telegram.ext import Application, CallbackQueryHandler, CommandHandler, Cont
 # ============================================================
 # BOT TELEGRAM + PIX AUTOMÁTICO (MERCADO PAGO) + CANAL VIP
 # ============================================================
-# COMO USAR
-# 1) Crie um arquivo .env ou configure variáveis de ambiente.
-# 2) Instale dependências:
-#    pip install python-telegram-bot==21.6 fastapi uvicorn requests python-dotenv
-# 3) Rode:
-#    uvicorn telegram_bot_canal_vip:app --host 0.0.0.0 --port 8000
-# 4) Exponha a aplicação com Railway, Render, VPS ou outro host.
-# 5) Configure o webhook do Mercado Pago apontando para:
-#    https://SEU_DOMINIO/webhook/mercadopago
+# Dependências:
+#   pip install fastapi uvicorn python-telegram-bot requests python-dotenv
 #
-# OBSERVAÇÕES IMPORTANTES
-# - O bot precisa ser ADMIN do canal VIP se você quiser gerar links de convite.
-# - Para máxima segurança, use TELEGRAM_CHANNEL_ID.
-# - Se não tiver o ID do canal agora, o sistema usa o link fixo do canal.
-# - O ideal é rotacionar credenciais expostas anteriormente e usar as novas aqui.
+# Start command no Railway:
+#   uvicorn main:app --host 0.0.0.0 --port $PORT
+#
+# Variáveis no Railway:
+#   TELEGRAM_BOT_TOKEN=...
+#   MERCADO_PAGO_ACCESS_TOKEN=...
+#   START_IMAGE_URL=https://sua-imagem-publica.jpg
+#   BASE_URL=https://seu-app.up.railway.app
+#   PAYMENT_NAME=Telegram Filipe Dias
+#   CHANNEL_INVITE_LINK=https://t.me/+...
+#   TELEGRAM_CHANNEL_ID=-100...
+#   TELEGRAM_CHANNEL_USERNAME=@seucanal   (opcional)
+#
+# Observações:
+# - O bot precisa ser ADMIN do canal VIP para criar links dinâmicos.
+# - Se não conseguir criar links dinâmicos, ele usa CHANNEL_INVITE_LINK.
+# - Para produção, prefira guardar tudo em variáveis do Railway.
 # ============================================================
 
 try:
@@ -47,19 +53,14 @@ logger = logging.getLogger(__name__)
 # =========================
 # VARIÁVEIS DE AMBIENTE
 # =========================
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8618202152:AAHphBUEaJ61SwRPk9AnAmxx4o77a4D-gtU")
-MERCADO_PAGO_ACCESS_TOKEN = os.getenv("MERCADO_PAGO_ACCESS_TOKEN", "APP_USR-4121563721353492-062203-f6ac453ee23977f136612b651e1ba0cf-279640910")
-MERCADO_PAGO_WEBHOOK_SECRET = os.getenv("MERCADO_PAGO_WEBHOOK_SECRET", "")
-START_IMAGE_URL = os.getenv(
-    "START_IMAGE_URL",
-    "https://i.imgur.com/SeuLinkDaImagem.jpg",
-)
-BASE_URL = os.getenv("BASE_URL", "https://SEU-DOMINIO-AQUI.com")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+MERCADO_PAGO_ACCESS_TOKEN = os.getenv("MERCADO_PAGO_ACCESS_TOKEN", "")
+START_IMAGE_URL = os.getenv("START_IMAGE_URL", "")
+BASE_URL = os.getenv("BASE_URL", "")
 PAYMENT_NAME = os.getenv("PAYMENT_NAME", "Telegram Filipe Dias")
-CHANNEL_INVITE_LINK = os.getenv("CHANNEL_INVITE_LINK", "https://t.me/+WQakAVG_b5s5NjQx")
-TELEGRAM_CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID", "-1003889710369")
+CHANNEL_INVITE_LINK = os.getenv("CHANNEL_INVITE_LINK", "")
+TELEGRAM_CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID", "")
 TELEGRAM_CHANNEL_USERNAME = os.getenv("TELEGRAM_CHANNEL_USERNAME", "")
-BOT_USERNAME = os.getenv("BOT_USERNAME", "")
 
 # =========================
 # DADOS DOS PLANOS
@@ -107,15 +108,15 @@ WELCOME_TEXT = (
 # =========================
 # BANCO SIMPLES EM MEMÓRIA
 # =========================
-# Em produção, substitua por PostgreSQL, Supabase, SQLite ou Redis.
+# Em produção, o ideal é trocar por PostgreSQL, Redis, Supabase ou SQLite.
 payments_store: dict[str, dict[str, Any]] = {}
 user_last_pending: dict[int, str] = {}
 
+
 # =========================
-# FASTAPI APP
+# TELEGRAM APPLICATION
 # =========================
-app = FastAPI(title="Telegram VIP Bot")
-telegram_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+telegram_app = Application.builder().token(TELEGRAM_BOT_TOKEN).updater(None).build()
 
 
 # =========================
@@ -142,13 +143,13 @@ def build_plan_keyboard(plan_key: str) -> InlineKeyboardMarkup:
     )
 
 
-def build_payment_keyboard(payment_id: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("🔄 Verificar pagamento", callback_data=f"check_{payment_id}")],
-            [InlineKeyboardButton("⬅️ Voltar aos planos", callback_data="back_to_home")],
-        ]
-    )
+def build_payment_keyboard(payment_id: str, ticket_url: str = "") -> InlineKeyboardMarkup:
+    rows = []
+    if ticket_url:
+        rows.append([InlineKeyboardButton("💳 Abrir QR Code Pix", url=ticket_url)])
+    rows.append([InlineKeyboardButton("🔄 Verificar pagamento", callback_data=f"check_{payment_id}")])
+    rows.append([InlineKeyboardButton("⬅️ Voltar aos planos", callback_data="back_to_home")])
+    return InlineKeyboardMarkup(rows)
 
 
 def build_access_keyboard(invite_link: str) -> InlineKeyboardMarkup:
@@ -166,6 +167,10 @@ def validate_settings() -> None:
         missing.append("TELEGRAM_BOT_TOKEN")
     if not MERCADO_PAGO_ACCESS_TOKEN:
         missing.append("MERCADO_PAGO_ACCESS_TOKEN")
+    if not BASE_URL:
+        missing.append("BASE_URL")
+    if not START_IMAGE_URL:
+        missing.append("START_IMAGE_URL")
     if not CHANNEL_INVITE_LINK and not TELEGRAM_CHANNEL_ID and not TELEGRAM_CHANNEL_USERNAME:
         missing.append("CHANNEL_INVITE_LINK ou TELEGRAM_CHANNEL_ID")
     if missing:
@@ -229,6 +234,8 @@ def create_pix_payment(user_id: int, username: str | None, plan_key: str) -> dic
         "ticket_url": tx_data.get("ticket_url", ""),
         "created_at": datetime.now(timezone.utc).isoformat(),
         "approved_at": None,
+        "access_released": False,
+        "invite_link": "",
     }
     user_last_pending[user_id] = payment_id
     return payments_store[payment_id]
@@ -254,14 +261,20 @@ async def create_dynamic_invite_link(user_id: int) -> str:
     if not chat_ref:
         return CHANNEL_INVITE_LINK
 
-    expire_date = datetime.now(timezone.utc) + timedelta(hours=24)
-    invite = await telegram_app.bot.create_chat_invite_link(
-        chat_id=chat_ref,
-        expire_date=expire_date,
-        member_limit=1,
-        name=f"vip-user-{user_id}",
-    )
-    return invite.invite_link
+    try:
+        expire_date = datetime.now(timezone.utc) + timedelta(hours=24)
+        invite = await telegram_app.bot.create_chat_invite_link(
+            chat_id=chat_ref,
+            expire_date=expire_date,
+            member_limit=1,
+            name=f"vip-user-{user_id}",
+        )
+        return invite.invite_link
+    except Exception as exc:
+        logger.warning("Falha ao criar link dinâmico. Usando link fixo. Erro: %s", exc)
+        if CHANNEL_INVITE_LINK:
+            return CHANNEL_INVITE_LINK
+        raise
 
 
 async def release_access(internal_payment_id: str) -> None:
@@ -280,7 +293,7 @@ async def release_access(internal_payment_id: str) -> None:
         f"✅ <b>Pagamento aprovado!</b>\n\n"
         f"<b>Plano:</b> {payment['plan_title']}\n"
         f"<b>Status:</b> Acesso liberado\n\n"
-        f"Toque no botão abaixo para entrar no canal VIP."
+        "Toque no botão abaixo para entrar no canal VIP."
     )
     await telegram_app.bot.send_message(
         chat_id=payment["user_id"],
@@ -366,31 +379,19 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             plan_key=plan_key,
         )
 
-        ticket_url = payment.get("ticket_url")
-        qr_code = payment.get("qr_code")
         text = (
             f"<b>{payment['plan_title']}</b>\n\n"
             f"<b>Valor:</b> R$ {brl(Decimal(payment['amount']))}\n"
             f"<b>Status:</b> Aguardando pagamento\n\n"
-            f"<b>Copia e cola Pix:</b>\n<code>{qr_code}</code>\n\n"
+            f"<b>Copia e cola Pix:</b>\n<code>{payment['qr_code']}</code>\n\n"
             "Após pagar, o sistema libera seu acesso automaticamente.\n"
             "Você também pode tocar em verificar pagamento abaixo."
         )
 
-        keyboard = build_payment_keyboard(payment["internal_payment_id"])
-        if ticket_url:
-            keyboard = InlineKeyboardMarkup(
-                [
-                    [InlineKeyboardButton("💳 Abrir QR Code Pix", url=ticket_url)],
-                    [InlineKeyboardButton("🔄 Verificar pagamento", callback_data=f"check_{payment['internal_payment_id']}")],
-                    [InlineKeyboardButton("⬅️ Voltar aos planos", callback_data="back_to_home")],
-                ]
-            )
-
         await query.message.reply_text(
             text=text,
             parse_mode="HTML",
-            reply_markup=keyboard,
+            reply_markup=build_payment_keyboard(payment["internal_payment_id"], payment.get("ticket_url", "")),
         )
         return
 
@@ -419,27 +420,31 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await query.message.reply_text("Opção não reconhecida.")
 
 
-# =========================
-# EVENTOS FASTAPI
-# =========================
-@app.on_event("startup")
-async def on_startup() -> None:
+telegram_app.add_handler(CommandHandler("start", start))
+telegram_app.add_handler(CommandHandler("help", help_command))
+telegram_app.add_handler(CallbackQueryHandler(button_handler))
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     validate_settings()
     await telegram_app.initialize()
     await telegram_app.start()
-    telegram_app.add_handler(CommandHandler("start", start))
-    telegram_app.add_handler(CommandHandler("help", help_command))
-    telegram_app.add_handler(CallbackQueryHandler(button_handler))
     logger.info("Aplicação iniciada com sucesso.")
+    try:
+        yield
+    finally:
+        await telegram_app.stop()
+        await telegram_app.shutdown()
+        logger.info("Aplicação finalizada.")
 
 
-@app.on_event("shutdown")
-async def on_shutdown() -> None:
-    await telegram_app.stop()
-    await telegram_app.shutdown()
-    logger.info("Aplicação finalizada.")
+app = FastAPI(title="Telegram VIP Bot", lifespan=lifespan)
 
 
+# =========================
+# ROTAS FASTAPI
+# =========================
 @app.get("/")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -449,7 +454,7 @@ async def health() -> dict[str, str]:
 async def telegram_webhook(request: Request) -> JSONResponse:
     data = await request.json()
     update = Update.de_json(data, telegram_app.bot)
-    await telegram_app.process_update(update)
+    await telegram_app.update_queue.put(update)
     return JSONResponse({"ok": True})
 
 
@@ -499,26 +504,3 @@ async def debug_payment(internal_payment_id: str) -> dict[str, Any]:
     if not payment:
         raise HTTPException(status_code=404, detail="Pagamento não encontrado.")
     return payment
-
-
-# =========================
-# COMANDOS ÚTEIS
-# =========================
-# Para configurar webhook do Telegram:
-# https://api.telegram.org/botSEU_TOKEN/setWebhook?url=https://SEU_DOMINIO/telegram/webhook
-#
-# Exemplo de .env:
-# TELEGRAM_BOT_TOKEN=8618202152:AAHphBUEaJ61SwRPk9AnAmxx4o77a4D-gtU
-# MERCADO_PAGO_ACCESS_TOKEN=APP_USR-4121563721353492-062203-f6ac453ee23977f136612b651e1ba0cf-279640910
-# START_IMAGE_URL=https://i.imgur.com/SeuLinkDaImagem.jpg
-# BASE_URL=https://SEU-DOMINIO-AQUI.com
-# PAYMENT_NAME=Telegram Filipe Dias
-# CHANNEL_INVITE_LINK=https://t.me/+WQakAVG_b5s5NjQx
-# TELEGRAM_CHANNEL_ID=-1003889710369
-# TELEGRAM_CHANNEL_USERNAME=
-# BOT_USERNAME=
-#
-# Se quiser descobrir o ID do canal:
-# 1) adicione o bot como admin no canal
-# 2) envie uma mensagem no canal
-# 3) consulte getUpdates ou use um bot de descoberta de chat_id
