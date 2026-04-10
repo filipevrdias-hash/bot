@@ -47,17 +47,17 @@ logger = logging.getLogger(__name__)
 # =========================
 # VARIÁVEIS DE AMBIENTE
 # =========================
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-MERCADO_PAGO_ACCESS_TOKEN = os.getenv("MERCADO_PAGO_ACCESS_TOKEN", "")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8618202152:AAHphBUEaJ61SwRPk9AnAmxx4o77a4D-gtU")
+MERCADO_PAGO_ACCESS_TOKEN = os.getenv("MERCADO_PAGO_ACCESS_TOKEN", "APP_USR-4121563721353492-062203-f6ac453ee23977f136612b651e1ba0cf-279640910")
 MERCADO_PAGO_WEBHOOK_SECRET = os.getenv("MERCADO_PAGO_WEBHOOK_SECRET", "")
 START_IMAGE_URL = os.getenv(
     "START_IMAGE_URL",
-    "https://via.placeholder.com/1080x1350.png?text=Canal+VIP",
+    "https://i.imgur.com/SeuLinkDaImagem.jpg",
 )
-BASE_URL = os.getenv("BASE_URL", "https://seu-dominio.com")
+BASE_URL = os.getenv("BASE_URL", "https://SEU-DOMINIO-AQUI.com")
 PAYMENT_NAME = os.getenv("PAYMENT_NAME", "Telegram Filipe Dias")
-CHANNEL_INVITE_LINK = os.getenv("CHANNEL_INVITE_LINK", "")
-TELEGRAM_CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID", "")
+CHANNEL_INVITE_LINK = os.getenv("CHANNEL_INVITE_LINK", "https://t.me/+WQakAVG_b5s5NjQx")
+TELEGRAM_CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID", "-1003889710369")
 TELEGRAM_CHANNEL_USERNAME = os.getenv("TELEGRAM_CHANNEL_USERNAME", "")
 BOT_USERNAME = os.getenv("BOT_USERNAME", "")
 
@@ -98,8 +98,12 @@ PLANS = {
 }
 
 WELCOME_TEXT = (
-    "🔥 <b>Bem-vindo ao conteúdo exclusivo</b>\n\n"
-    "Conteúdo reservado, acesso VIP e atualizações especiais.\n\n"
+    "🔥 <b>Bem-vindo ao conteúdo exclusivo</b>
+
+"
+    "Entre no canal VIP e receba conteúdos exclusivos, materiais especiais e atualizações reservadas.
+
+"
     "<b>Escolha um dos planos abaixo:</b>"
 )
 
@@ -507,15 +511,15 @@ async def debug_payment(internal_payment_id: str) -> dict[str, Any]:
 # https://api.telegram.org/botSEU_TOKEN/setWebhook?url=https://SEU_DOMINIO/telegram/webhook
 #
 # Exemplo de .env:
-# TELEGRAM_BOT_TOKEN=COLE_AQUI
-# MERCADO_PAGO_ACCESS_TOKEN=COLE_AQUI
-# START_IMAGE_URL=https://seusite.com/sua-imagem.jpg
-# BASE_URL=https://seu-dominio.com
+# TELEGRAM_BOT_TOKEN=8618202152:AAHphBUEaJ61SwRPk9AnAmxx4o77a4D-gtU
+# MERCADO_PAGO_ACCESS_TOKEN=APP_USR-4121563721353492-062203-f6ac453ee23977f136612b651e1ba0cf-279640910
+# START_IMAGE_URL=https://i.imgur.com/SeuLinkDaImagem.jpg
+# BASE_URL=https://SEU-DOMINIO-AQUI.com
 # PAYMENT_NAME=Telegram Filipe Dias
-# CHANNEL_INVITE_LINK=https://t.me/+seu_link
-# TELEGRAM_CHANNEL_ID=-1001234567890
-# TELEGRAM_CHANNEL_USERNAME=@seucanal
-# BOT_USERNAME=@SeuBot
+# CHANNEL_INVITE_LINK=https://t.me/+WQakAVG_b5s5NjQx
+# TELEGRAM_CHANNEL_ID=-1003889710369
+# TELEGRAM_CHANNEL_USERNAME=
+# BOT_USERNAME=
 #
 # Se quiser descobrir o ID do canal:
 # 1) adicione o bot como admin no canal
