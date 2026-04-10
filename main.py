@@ -98,12 +98,9 @@ PLANS = {
 }
 
 WELCOME_TEXT = (
-    "🔥 <b>Bem-vindo ao conteúdo exclusivo</b>
-
-"
-    "Entre no canal VIP e receba conteúdos exclusivos, materiais especiais e atualizações reservadas.
-
-"
+    "🔥 <b>Bem-vindo ao conteúdo exclusivo</b>\n\n"
+    "Conteúdo VIP liberado apenas para membros.\n\n"
+    "Receba conteúdos exclusivos, atualizações privadas e acesso antecipado.\n\n"
     "<b>Escolha um dos planos abaixo:</b>"
 )
 
