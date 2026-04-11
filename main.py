@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -11,31 +12,6 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
-
-# ============================================================
-# BOT TELEGRAM + PIX AUTOMÁTICO (MERCADO PAGO) + CANAL VIP
-# ============================================================
-# Dependências:
-#   pip install fastapi uvicorn python-telegram-bot requests python-dotenv
-#
-# Start command no Railway:
-#   uvicorn main:app --host 0.0.0.0 --port $PORT
-#
-# Variáveis no Railway:
-#   TELEGRAM_BOT_TOKEN=...
-#   MERCADO_PAGO_ACCESS_TOKEN=...
-#   START_IMAGE_URL=https://sua-imagem-publica.jpg
-#   BASE_URL=https://seu-app.up.railway.app
-#   PAYMENT_NAME=Telegram Filipe Dias
-#   CHANNEL_INVITE_LINK=https://t.me/+...
-#   TELEGRAM_CHANNEL_ID=-100...
-#   TELEGRAM_CHANNEL_USERNAME=@seucanal   (opcional)
-#
-# Observações:
-# - O bot precisa ser ADMIN do canal VIP para criar links dinâmicos.
-# - Se não conseguir criar links dinâmicos, ele usa CHANNEL_INVITE_LINK.
-# - Para produção, prefira guardar tudo em variáveis do Railway.
-# ============================================================
 
 try:
     from dotenv import load_dotenv
@@ -106,17 +82,18 @@ WELCOME_TEXT = (
 )
 
 # =========================
-# BANCO SIMPLES EM MEMÓRIA
+# MEMÓRIA TEMPORÁRIA
 # =========================
-# Em produção, o ideal é trocar por PostgreSQL, Redis, Supabase ou SQLite.
 payments_store: dict[str, dict[str, Any]] = {}
 user_last_pending: dict[int, str] = {}
 
-
 # =========================
-# TELEGRAM APPLICATION
+# TELEGRAM LAZY INIT
 # =========================
-telegram_app = Application.builder().token(TELEGRAM_BOT_TOKEN).updater(None).build()
+telegram_app: Application | None = None
+telegram_ready = False
+telegram_started = False
+telegram_lock = asyncio.Lock()
 
 
 # =========================
@@ -161,34 +138,85 @@ def build_access_keyboard(invite_link: str) -> InlineKeyboardMarkup:
 # =========================
 # UTILITÁRIOS
 # =========================
-def validate_settings() -> None:
-    missing = []
-    if not TELEGRAM_BOT_TOKEN:
-        missing.append("TELEGRAM_BOT_TOKEN")
-    if not MERCADO_PAGO_ACCESS_TOKEN:
-        missing.append("MERCADO_PAGO_ACCESS_TOKEN")
-    if not BASE_URL:
-        missing.append("BASE_URL")
-    if not START_IMAGE_URL:
-        missing.append("START_IMAGE_URL")
-    if not CHANNEL_INVITE_LINK and not TELEGRAM_CHANNEL_ID and not TELEGRAM_CHANNEL_USERNAME:
-        missing.append("CHANNEL_INVITE_LINK ou TELEGRAM_CHANNEL_ID")
-    if missing:
-        raise RuntimeError(f"Configurações ausentes: {', '.join(missing)}")
-
-
 def brl(value: Decimal) -> str:
     return f"{value:.2f}".replace(".", ",")
 
 
+def require_env(var_name: str, value: str) -> None:
+    if not value:
+        raise RuntimeError(f"Variável ausente: {var_name}")
+
+
 def get_mp_headers() -> dict[str, str]:
+    require_env("MERCADO_PAGO_ACCESS_TOKEN", MERCADO_PAGO_ACCESS_TOKEN)
     return {
         "Authorization": f"Bearer {MERCADO_PAGO_ACCESS_TOKEN}",
         "Content-Type": "application/json",
     }
 
 
+async def get_telegram_app() -> Application:
+    global telegram_app
+
+    if telegram_app is None:
+        require_env("TELEGRAM_BOT_TOKEN", TELEGRAM_BOT_TOKEN)
+
+        app = Application.builder().token(TELEGRAM_BOT_TOKEN).updater(None).build()
+        app.add_handler(CommandHandler("start", start))
+        app.add_handler(CommandHandler("help", help_command))
+        app.add_handler(CallbackQueryHandler(button_handler))
+        telegram_app = app
+
+    return telegram_app
+
+
+async def ensure_telegram_ready() -> Application:
+    global telegram_ready, telegram_started
+
+    if telegram_ready and telegram_app is not None:
+        return telegram_app
+
+    async with telegram_lock:
+        if telegram_ready and telegram_app is not None:
+            return telegram_app
+
+        app = await get_telegram_app()
+
+        logger.info("Inicializando Telegram...")
+        await app.initialize()
+
+        logger.info("Iniciando Telegram...")
+        await app.start()
+
+        me = await app.bot.get_me()
+        logger.info("Bot autenticado com sucesso: @%s", me.username)
+
+        telegram_ready = True
+        telegram_started = True
+        return app
+
+
+async def send_home(bot, chat_id: int) -> None:
+    if START_IMAGE_URL:
+        await bot.send_photo(
+            chat_id=chat_id,
+            photo=START_IMAGE_URL,
+            caption=WELCOME_TEXT,
+            parse_mode="HTML",
+            reply_markup=build_main_keyboard(),
+        )
+    else:
+        await bot.send_message(
+            chat_id=chat_id,
+            text=WELCOME_TEXT,
+            parse_mode="HTML",
+            reply_markup=build_main_keyboard(),
+        )
+
+
 def create_pix_payment(user_id: int, username: str | None, plan_key: str) -> dict[str, Any]:
+    require_env("BASE_URL", BASE_URL)
+
     plan = PLANS[plan_key]
     payment_id = str(uuid4())
     external_reference = f"vip-{plan_key}-{user_id}-{payment_id}"
@@ -259,11 +287,15 @@ async def create_dynamic_invite_link(user_id: int) -> str:
 
     chat_ref = TELEGRAM_CHANNEL_ID or TELEGRAM_CHANNEL_USERNAME
     if not chat_ref:
-        return CHANNEL_INVITE_LINK
+        if CHANNEL_INVITE_LINK:
+            return CHANNEL_INVITE_LINK
+        raise RuntimeError("Defina CHANNEL_INVITE_LINK ou TELEGRAM_CHANNEL_ID.")
+
+    app = await ensure_telegram_ready()
 
     try:
         expire_date = datetime.now(timezone.utc) + timedelta(hours=24)
-        invite = await telegram_app.bot.create_chat_invite_link(
+        invite = await app.bot.create_chat_invite_link(
             chat_id=chat_ref,
             expire_date=expire_date,
             member_limit=1,
@@ -279,12 +311,12 @@ async def create_dynamic_invite_link(user_id: int) -> str:
 
 async def release_access(internal_payment_id: str) -> None:
     payment = payments_store.get(internal_payment_id)
-    if not payment:
-        return
-    if payment.get("access_released"):
+    if not payment or payment.get("access_released"):
         return
 
+    app = await ensure_telegram_ready()
     invite_link = await create_dynamic_invite_link(payment["user_id"])
+
     payment["access_released"] = True
     payment["invite_link"] = invite_link
     payment["approved_at"] = datetime.now(timezone.utc).isoformat()
@@ -295,7 +327,8 @@ async def release_access(internal_payment_id: str) -> None:
         f"<b>Status:</b> Acesso liberado\n\n"
         "Toque no botão abaixo para entrar no canal VIP."
     )
-    await telegram_app.bot.send_message(
+
+    await app.bot.send_message(
         chat_id=payment["user_id"],
         text=text,
         parse_mode="HTML",
@@ -310,14 +343,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat = update.effective_chat
     if not chat:
         return
-
-    await context.bot.send_photo(
-        chat_id=chat.id,
-        photo=START_IMAGE_URL,
-        caption=WELCOME_TEXT,
-        parse_mode="HTML",
-        reply_markup=build_main_keyboard(),
-    )
+    await send_home(context.bot, chat.id)
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -339,12 +365,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     user = query.from_user
 
     if data == "back_to_home":
-        await query.message.reply_photo(
-            photo=START_IMAGE_URL,
-            caption=WELCOME_TEXT,
-            parse_mode="HTML",
-            reply_markup=build_main_keyboard(),
-        )
+        await send_home(context.bot, query.message.chat.id)
         return
 
     if data.startswith("plan_"):
@@ -391,7 +412,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await query.message.reply_text(
             text=text,
             parse_mode="HTML",
-            reply_markup=build_payment_keyboard(payment["internal_payment_id"], payment.get("ticket_url", "")),
+            reply_markup=build_payment_keyboard(
+                payment["internal_payment_id"],
+                payment.get("ticket_url", ""),
+            ),
         )
         return
 
@@ -408,7 +432,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
         if status == "approved":
             await release_access(internal_payment_id)
-            await query.message.reply_text("✅ Pagamento confirmado. Seu acesso foi liberado no chat.")
+            await query.message.reply_text(
+                "✅ Pagamento confirmado. Seu acesso foi liberado no chat."
+            )
             return
 
         await query.message.reply_text(
@@ -420,82 +446,101 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await query.message.reply_text("Opção não reconhecida.")
 
 
-telegram_app.add_handler(CommandHandler("start", start))
-telegram_app.add_handler(CommandHandler("help", help_command))
-telegram_app.add_handler(CallbackQueryHandler(button_handler))
-
-
+# =========================
+# FASTAPI
+# =========================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    validate_settings()
-    await telegram_app.initialize()
-    await telegram_app.start()
-    logger.info("Aplicação iniciada com sucesso.")
+    logger.info("FastAPI iniciada.")
     try:
         yield
     finally:
-        await telegram_app.stop()
-        await telegram_app.shutdown()
-        logger.info("Aplicação finalizada.")
+        global telegram_started, telegram_ready
+
+        if telegram_app is not None:
+            try:
+                if telegram_started:
+                    await telegram_app.stop()
+                    logger.info("Telegram stop OK")
+            except Exception as exc:
+                logger.warning("Falha no stop do Telegram: %s", exc)
+
+            try:
+                if telegram_ready:
+                    await telegram_app.shutdown()
+                    logger.info("Telegram shutdown OK")
+            except Exception as exc:
+                logger.warning("Falha no shutdown do Telegram: %s", exc)
 
 
 app = FastAPI(title="Telegram VIP Bot", lifespan=lifespan)
 
 
-# =========================
-# ROTAS FASTAPI
-# =========================
 @app.get("/")
-async def health() -> dict[str, str]:
-    return {"status": "ok"}
+async def health() -> dict[str, Any]:
+    return {
+        "status": "ok",
+        "telegram_ready": telegram_ready,
+        "base_url_ok": bool(BASE_URL),
+        "image_url_ok": bool(START_IMAGE_URL),
+    }
 
 
 @app.post("/telegram/webhook")
 async def telegram_webhook(request: Request) -> JSONResponse:
-    data = await request.json()
-    update = Update.de_json(data, telegram_app.bot)
-    await telegram_app.update_queue.put(update)
-    return JSONResponse({"ok": True})
+    try:
+        app_telegram = await ensure_telegram_ready()
+        data = await request.json()
+        update = Update.de_json(data, app_telegram.bot)
+        await app_telegram.process_update(update)
+        return JSONResponse({"ok": True})
+    except Exception as exc:
+        logger.exception("Erro no webhook do Telegram: %s", exc)
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
 
 
 @app.post("/webhook/mercadopago")
 async def mercadopago_webhook(request: Request) -> JSONResponse:
-    payload = await request.json()
-    logger.info("Webhook Mercado Pago recebido: %s", payload)
+    try:
+        payload = await request.json()
+        logger.info("Webhook Mercado Pago recebido: %s", payload)
 
-    event_type = payload.get("type") or payload.get("action")
-    data = payload.get("data", {})
-    mp_payment_id = data.get("id")
+        event_type = payload.get("type") or payload.get("action")
+        data = payload.get("data", {})
+        mp_payment_id = data.get("id")
 
-    if not mp_payment_id:
-        return JSONResponse({"received": True, "ignored": True})
+        if not mp_payment_id:
+            return JSONResponse({"received": True, "ignored": True})
 
-    mp_data = get_mp_payment(str(mp_payment_id))
-    external_reference = mp_data.get("external_reference", "")
-    status = mp_data.get("status", "pending")
+        mp_data = get_mp_payment(str(mp_payment_id))
+        external_reference = mp_data.get("external_reference", "")
+        status = mp_data.get("status", "pending")
 
-    found_id = None
-    for internal_payment_id, payment in payments_store.items():
-        if str(payment.get("mp_payment_id")) == str(mp_payment_id):
-            payment["status"] = status
-            found_id = internal_payment_id
-            break
-        if payment.get("external_reference") == external_reference:
-            payment["status"] = status
-            payment["mp_payment_id"] = mp_payment_id
-            found_id = internal_payment_id
-            break
+        found_id = None
+        for internal_payment_id, payment in payments_store.items():
+            if str(payment.get("mp_payment_id")) == str(mp_payment_id):
+                payment["status"] = status
+                found_id = internal_payment_id
+                break
+            if payment.get("external_reference") == external_reference:
+                payment["status"] = status
+                payment["mp_payment_id"] = mp_payment_id
+                found_id = internal_payment_id
+                break
 
-    if found_id and status == "approved":
-        await release_access(found_id)
+        if found_id and status == "approved":
+            await release_access(found_id)
 
-    return JSONResponse(
-        {
-            "received": True,
-            "event_type": event_type,
-            "status": status,
-        }
-    )
+        return JSONResponse(
+            {
+                "received": True,
+                "event_type": event_type,
+                "status": status,
+            }
+        )
+    except Exception as exc:
+        logger.exception("Erro no webhook do Mercado Pago: %s", exc)
+        return JSONResponse({"received": False, "error": str(exc)}, status_code=500)
 
 
 @app.get("/debug/payment/{internal_payment_id}")
